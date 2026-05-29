@@ -22,7 +22,6 @@ data class CompressSettings(
     val backupFolderName: String = "bk",
     val language: AppLanguage = AppLanguage.Chinese
 )
-
 data class CompressProgress(
     val total: Int = 0,
     val processed: Int = 0,
