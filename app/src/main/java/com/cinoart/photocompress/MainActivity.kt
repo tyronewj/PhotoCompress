@@ -43,7 +43,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -51,7 +50,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,6 +59,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -72,6 +71,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+
+private const val PREFS_NAME = "photo_compress_settings"
+private const val KEY_LANGUAGE = "language"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -91,16 +93,18 @@ fun PhotoCompressApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val appVersionLabel = remember(context) { appVersionLabel(context) }
+    var language by rememberSaveable { mutableStateOf(loadAppLanguage(context)) }
+    val text = remember(language) { AppText(language) }
     var showFeaturePage by rememberSaveable { mutableStateOf(false) }
     var selectedTreeUri by rememberSaveable { mutableStateOf<String?>(null) }
-    var selectedFolderName by rememberSaveable { mutableStateOf("未选择目录") }
-    var jpegQuality by rememberSaveable { mutableIntStateOf(86) }
+    var selectedFolderName by rememberSaveable { mutableStateOf<String?>(null) }
+    var qualityPreset by rememberSaveable { mutableStateOf(CompressionQualityPreset.Balanced) }
     var recursive by rememberSaveable { mutableStateOf(true) }
     var preserveExif by rememberSaveable { mutableStateOf(true) }
     var progress by remember { mutableStateOf(CompressProgress()) }
     var runningJob by remember { mutableStateOf<Job?>(null) }
     var cleanupJob by remember { mutableStateOf<Job?>(null) }
-    var status by remember { mutableStateOf("选择相册目录后开始压缩。JPEG 会保留 EXIF，已处理过的图片会跳过。") }
+    var status by remember { mutableStateOf<String?>(null) }
     val isRunning = runningJob?.isActive == true
     val isCleaning = cleanupJob?.isActive == true
     val isBusy = isRunning || isCleaning
@@ -109,6 +113,7 @@ fun PhotoCompressApp() {
         BackHandler { showFeaturePage = false }
         FeatureInfoScreen(
             appVersionLabel = appVersionLabel,
+            text = text,
             onBack = { showFeaturePage = false }
         )
         return
@@ -121,9 +126,9 @@ fun PhotoCompressApp() {
         val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         context.contentResolver.takePersistableUriPermission(uri, flags)
         selectedTreeUri = uri.toString()
-        selectedFolderName = DocumentFile.fromTreeUri(context, uri)?.name ?: "已选择目录"
+        selectedFolderName = DocumentFile.fromTreeUri(context, uri)?.name ?: text.selectedFolder
         progress = CompressProgress()
-        status = "目录已选择，可以开始压缩。"
+        status = text.folderReady
     }
 
     Scaffold(
@@ -131,7 +136,7 @@ fun PhotoCompressApp() {
             TopAppBar(
                 title = {
                     Column {
-                        Text("本地图片压缩")
+                        Text(text.appTitle)
                         Text(
                             appVersionLabel,
                             style = MaterialTheme.typography.labelMedium,
@@ -155,20 +160,33 @@ fun PhotoCompressApp() {
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             FolderPanel(
-                folderName = selectedFolderName,
-                status = status,
+                folderName = selectedFolderName ?: text.noFolder,
+                status = status ?: text.initialStatus,
                 isRunning = isBusy,
+                text = text,
                 onPickFolder = { folderLauncher.launch(null) }
             )
 
-            FeatureInfoButton(onClick = { showFeaturePage = true })
+            FeatureInfoButton(text = text, onClick = { showFeaturePage = true })
+
+            LanguagePanel(
+                language = language,
+                text = text,
+                isRunning = isBusy,
+                onLanguageChange = { nextLanguage ->
+                    language = nextLanguage
+                    saveAppLanguage(context, nextLanguage)
+                    status = null
+                }
+            )
 
             SettingsPanel(
-                quality = jpegQuality,
+                qualityPreset = qualityPreset,
                 recursive = recursive,
                 preserveExif = preserveExif,
                 isRunning = isBusy,
-                onQualityChange = { jpegQuality = it },
+                text = text,
+                onQualityPresetChange = { qualityPreset = it },
                 onRecursiveChange = { recursive = it },
                 onPreserveExifChange = { preserveExif = it }
             )
@@ -178,19 +196,22 @@ fun PhotoCompressApp() {
                 canClearBackups = selectedTreeUri != null && !isBusy,
                 isRunning = isRunning,
                 isCleaning = isCleaning,
+                text = text,
                 onStart = {
                     val uri = selectedTreeUri?.let(Uri::parse) ?: return@ActionPanel
                     val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
-                        status = "无法打开所选目录，请重新选择。"
+                        status = text.unableOpenFolder
                         return@ActionPanel
                     }
                     val settings = CompressSettings(
-                        jpegQuality = jpegQuality,
+                        jpegQuality = qualityPreset.jpegQuality,
                         recursive = recursive,
-                        preserveExif = preserveExif
+                        preserveExif = preserveExif,
+                        language = language
                     )
                     runningJob = scope.launch {
-                        status = "正在扫描和压缩..."
+                        val runText = AppText(language)
+                        status = runText.scanning
                         progress = CompressProgress()
                         try {
                             val result = withContext(Dispatchers.IO) {
@@ -202,14 +223,14 @@ fun PhotoCompressApp() {
                             }
                             progress = result
                             status = if (result.compressed > 0) {
-                                "完成：${result.compressed} 张压缩成功，${result.skipped} 张跳过，备份在 ${result.backupPath}。"
+                                runText.completeWithBackup(result.compressed, result.skipped, result.backupPath)
                             } else {
-                                "完成：没有新压缩图片，${result.skipped} 张已跳过。"
+                                runText.completeNoNew(result.skipped)
                             }
                         } catch (_: CancellationException) {
-                            status = "已停止，已完成的文件和备份会保留。"
+                            status = runText.stopped
                         } catch (error: Throwable) {
-                            status = "出错：${error.message ?: error.javaClass.simpleName}"
+                            status = runText.error(error.message ?: error.javaClass.simpleName)
                         } finally {
                             runningJob = null
                         }
@@ -221,22 +242,23 @@ fun PhotoCompressApp() {
                 onClearBackups = {
                     val uri = selectedTreeUri?.let(Uri::parse) ?: return@ActionPanel
                     val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
-                        status = "无法打开所选目录，请重新选择。"
+                        status = text.unableOpenFolder
                         return@ActionPanel
                     }
                     cleanupJob = scope.launch {
-                        status = "正在清空 bk 目录下的备份图片..."
+                        val runText = AppText(language)
+                        status = runText.clearingBackups
                         try {
                             val result = withContext(Dispatchers.IO) {
                                 ImageCompressor(context.applicationContext).deleteBackupImages(tree)
                             }
                             status = if (result.failed == 0) {
-                                "已删除 ${result.deletedFiles} 张备份图片，释放 ${ImageCompressor.formatBytes(result.deletedBytes)}。"
+                                runText.clearBackupSuccess(result.deletedFiles, ImageCompressor.formatBytes(result.deletedBytes))
                             } else {
-                                "已删除 ${result.deletedFiles} 张备份图片，${result.failed} 项删除失败。"
+                                runText.clearBackupPartial(result.deletedFiles, result.failed)
                             }
                         } catch (error: Throwable) {
-                            status = "清空备份失败：${error.message ?: error.javaClass.simpleName}"
+                            status = runText.clearBackupFailed(error.message ?: error.javaClass.simpleName)
                         } finally {
                             cleanupJob = null
                         }
@@ -244,7 +266,7 @@ fun PhotoCompressApp() {
                 }
             )
 
-            ProgressPanel(progress = progress)
+            ProgressPanel(progress = progress, text = text)
         }
     }
 }
@@ -260,10 +282,23 @@ private fun appVersionLabel(context: Context): String {
     return "v${packageInfo.versionName ?: "-"} ($versionCode)"
 }
 
+private fun loadAppLanguage(context: Context): AppLanguage {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    return AppLanguage.fromStorage(prefs.getString(KEY_LANGUAGE, null))
+}
+
+private fun saveAppLanguage(context: Context, language: AppLanguage) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_LANGUAGE, language.storageValue)
+        .apply()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FeatureInfoScreen(
     appVersionLabel: String,
+    text: AppText,
     onBack: () -> Unit
 ) {
     Scaffold(
@@ -271,12 +306,12 @@ private fun FeatureInfoScreen(
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = text.back)
                     }
                 },
                 title = {
                     Column {
-                        Text("功能说明")
+                        Text(text.featureInfo)
                         Text(
                             appVersionLabel,
                             style = MaterialTheme.typography.labelMedium,
@@ -300,28 +335,16 @@ private fun FeatureInfoScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             FeatureSection(
-                title = "本地压缩",
-                lines = listOf(
-                    "通过系统文件夹选择器选择相册目录。",
-                    "图片只在手机本地处理，不上传网络。",
-                    "支持 JPEG 和 PNG，JPEG 可调压缩质量。"
-                )
+                title = text.localCompressTitle,
+                lines = text.featureLocalLines
             )
             FeatureSection(
-                title = "备份与恢复空间",
-                lines = listOf(
-                    "压缩前会把原图复制到所选目录的 bk 文件夹。",
-                    "可一键清空 bk 中的备份图片，释放手机空间。",
-                    "清空备份会保留处理记录，避免下次重复压缩。"
-                )
+                title = text.backupTitle,
+                lines = text.featureBackupLines
             )
             FeatureSection(
-                title = "EXIF 与跳过规则",
-                lines = listOf(
-                    "保留 EXIF 开关开启时，会复制 JPEG 的拍摄时间、机型、定位等元数据。",
-                    "已处理过的图片会自动跳过。",
-                    "bk 目录和以 . 开头的隐藏目录不会进入压缩队列。"
-                )
+                title = text.exifTitle,
+                lines = text.featureExifLines
             )
         }
     }
@@ -332,6 +355,7 @@ private fun FolderPanel(
     folderName: String,
     status: String,
     isRunning: Boolean,
+    text: AppText,
     onPickFolder: () -> Unit
 ) {
     Card(
@@ -342,7 +366,7 @@ private fun FolderPanel(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("相册目录", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(text.folderTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = folderName,
@@ -355,7 +379,7 @@ private fun FolderPanel(
                 OutlinedButton(enabled = !isRunning, onClick = onPickFolder) {
                     Icon(Icons.Filled.FolderOpen, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("选择")
+                    Text(text.choose)
                 }
             }
             Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -364,14 +388,80 @@ private fun FolderPanel(
 }
 
 @Composable
-private fun FeatureInfoButton(onClick: () -> Unit) {
+private fun FeatureInfoButton(text: AppText, onClick: () -> Unit) {
     OutlinedButton(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth()
     ) {
         Icon(Icons.Filled.Info, contentDescription = null)
         Spacer(Modifier.width(8.dp))
-        Text("功能说明")
+        Text(text.featureInfo)
+    }
+}
+
+@Composable
+private fun LanguagePanel(
+    language: AppLanguage,
+    text: AppText,
+    isRunning: Boolean,
+    onLanguageChange: (AppLanguage) -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column {
+                Text(text.languageTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(text.languageHint, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                LanguageChoiceButton(
+                    label = text.chinese,
+                    selected = language == AppLanguage.Chinese,
+                    enabled = !isRunning,
+                    modifier = Modifier.weight(1f),
+                    onClick = { onLanguageChange(AppLanguage.Chinese) }
+                )
+                LanguageChoiceButton(
+                    label = text.english,
+                    selected = language == AppLanguage.English,
+                    enabled = !isRunning,
+                    modifier = Modifier.weight(1f),
+                    onClick = { onLanguageChange(AppLanguage.English) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LanguageChoiceButton(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    if (selected) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier
+        ) {
+            Text(label)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier
+        ) {
+            Text(label)
+        }
     }
 }
 
@@ -402,11 +492,12 @@ private fun FeatureLine(text: String) {
 
 @Composable
 private fun SettingsPanel(
-    quality: Int,
+    qualityPreset: CompressionQualityPreset,
     recursive: Boolean,
     preserveExif: Boolean,
     isRunning: Boolean,
-    onQualityChange: (Int) -> Unit,
+    text: AppText,
+    onQualityPresetChange: (CompressionQualityPreset) -> Unit,
     onRecursiveChange: (Boolean) -> Unit,
     onPreserveExifChange: (Boolean) -> Unit
 ) {
@@ -420,21 +511,27 @@ private fun SettingsPanel(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("JPEG 质量", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("$quality，数值越高画质越接近原图", style = MaterialTheme.typography.bodyMedium)
+                    Text(text.imageQuality, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(text.qualityPresetDescription(qualityPreset), style = MaterialTheme.typography.bodyMedium)
                 }
             }
-            Slider(
-                value = quality.toFloat(),
-                onValueChange = { onQualityChange(it.toInt()) },
-                enabled = !isRunning,
-                valueRange = 70f..95f,
-                steps = 24
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CompressionQualityPreset.entries.forEach { preset ->
+                    QualityPresetButton(
+                        label = text.qualityPresetLabel(preset),
+                        selected = preset == qualityPreset,
+                        enabled = !isRunning,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(56.dp),
+                        onClick = { onQualityPresetChange(preset) }
+                    )
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("保留 EXIF", style = MaterialTheme.typography.bodyLarge)
-                    Text("JPEG 压缩后复制拍摄时间、机型、定位等元数据", style = MaterialTheme.typography.bodyMedium)
+                    Text(text.preserveExif, style = MaterialTheme.typography.bodyLarge)
+                    Text(text.preserveExifDescription, style = MaterialTheme.typography.bodyMedium)
                 }
                 Switch(
                     checked = preserveExif,
@@ -444,8 +541,8 @@ private fun SettingsPanel(
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("包含子目录", style = MaterialTheme.typography.bodyLarge)
-                    Text("会跳过 bk、隐藏目录和已处理图片", style = MaterialTheme.typography.bodyMedium)
+                    Text(text.includeSubfolders, style = MaterialTheme.typography.bodyLarge)
+                    Text(text.includeSubfoldersDescription, style = MaterialTheme.typography.bodyMedium)
                 }
                 Switch(
                     checked = recursive,
@@ -458,11 +555,49 @@ private fun SettingsPanel(
 }
 
 @Composable
+private fun QualityPresetButton(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    if (selected) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier
+        ) {
+            Text(
+                text = label,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier
+        ) {
+            Text(
+                text = label,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
 private fun ActionPanel(
     canStart: Boolean,
     canClearBackups: Boolean,
     isRunning: Boolean,
     isCleaning: Boolean,
+    text: AppText,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onClearBackups: () -> Unit
@@ -476,7 +611,7 @@ private fun ActionPanel(
             ) {
                 Icon(Icons.Filled.PlayArrow, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("开始压缩")
+                Text(text.startCompress)
             }
             OutlinedButton(
                 onClick = onStop,
@@ -485,7 +620,7 @@ private fun ActionPanel(
             ) {
                 Icon(Icons.Filled.Stop, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("停止")
+                Text(text.stop)
             }
         }
         OutlinedButton(
@@ -495,14 +630,14 @@ private fun ActionPanel(
         ) {
             Icon(Icons.Filled.Delete, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text(if (isCleaning) "正在清空备份..." else "清空备份图片")
+            Text(if (isCleaning) text.clearingBackupsButton else text.clearBackups)
         }
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ProgressPanel(progress: CompressProgress) {
+private fun ProgressPanel(progress: CompressProgress, text: AppText) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         shape = MaterialTheme.shapes.medium
@@ -512,7 +647,7 @@ private fun ProgressPanel(progress: CompressProgress) {
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("处理进度", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(text.progressTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
                 Text("${progress.processed}/${progress.total}", style = MaterialTheme.typography.bodyMedium)
             }
@@ -534,18 +669,18 @@ private fun ProgressPanel(progress: CompressProgress) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                StatChip("成功", progress.compressed.toString())
-                StatChip("跳过", progress.skipped.toString())
-                StatChip("失败", progress.failed.toString())
-                StatChip("节省", "${String.format(Locale.US, "%.1f", progress.savedPercent)}%")
+                StatChip(text.success, progress.compressed.toString())
+                StatChip(text.skipped, progress.skipped.toString())
+                StatChip(text.failed, progress.failed.toString())
+                StatChip(text.saved, "${String.format(Locale.US, "%.1f", progress.savedPercent)}%")
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                SizeBox("原始", ImageCompressor.formatBytes(progress.originalBytes), Modifier.weight(1f))
-                SizeBox("压缩后", ImageCompressor.formatBytes(progress.finalBytes), Modifier.weight(1f))
-                SizeBox("节省", ImageCompressor.formatBytes(progress.savedBytes), Modifier.weight(1f))
+                SizeBox(text.original, ImageCompressor.formatBytes(progress.originalBytes), Modifier.weight(1f))
+                SizeBox(text.compressed, ImageCompressor.formatBytes(progress.finalBytes), Modifier.weight(1f))
+                SizeBox(text.saved, ImageCompressor.formatBytes(progress.savedBytes), Modifier.weight(1f))
             }
             if (progress.backupPath.isNotBlank()) {
-                Text("备份目录：${progress.backupPath}", style = MaterialTheme.typography.bodyMedium)
+                Text("${text.backupDir}: ${progress.backupPath}", style = MaterialTheme.typography.bodyMedium)
             }
             if (progress.messages.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -593,7 +728,8 @@ fun PhotoCompressPreview() {
                 finalBytes = 3_100_000,
                 backupPath = "bk/20260528_220000",
                 messages = listOf("完成：DCIM/IMG_001.jpg 4.80 MB -> 1.20 MB")
-            )
+            ),
+            text = AppText(AppLanguage.Chinese)
         )
     }
 }

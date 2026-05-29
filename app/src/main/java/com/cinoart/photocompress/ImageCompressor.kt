@@ -19,7 +19,8 @@ data class CompressSettings(
     val jpegQuality: Int = 86,
     val recursive: Boolean = true,
     val preserveExif: Boolean = true,
-    val backupFolderName: String = "bk"
+    val backupFolderName: String = "bk",
+    val language: AppLanguage = AppLanguage.Chinese
 )
 
 data class CompressProgress(
@@ -56,11 +57,12 @@ class ImageCompressor(private val context: Context) {
         settings: CompressSettings,
         onProgress: suspend (CompressProgress) -> Unit
     ): CompressProgress {
+        val text = AppText(settings.language)
         val runFolderName = timestamp()
         val backupRoot = root.findFile(settings.backupFolderName)
             ?: root.createDirectory(settings.backupFolderName)
-            ?: error("无法创建备份目录：${settings.backupFolderName}")
-        val markerStore = ProcessMarkerStore(backupRoot)
+            ?: error(text.createBackupDirFailed(settings.backupFolderName))
+        val markerStore = ProcessMarkerStore(backupRoot, text)
         val processedMarkers = markerStore.load().toMutableMap()
         val entries = collectImages(root, settings)
         var backupRunRoot: DocumentFile? = null
@@ -68,7 +70,7 @@ class ImageCompressor(private val context: Context) {
         fun ensureBackupRunRoot(): DocumentFile {
             backupRunRoot?.let { return it }
             val created = backupRoot.createDirectory(runFolderName)
-                ?: error("无法创建本次备份目录：${settings.backupFolderName}/$runFolderName")
+                ?: error(text.createBackupRunDirFailed("${settings.backupFolderName}/$runFolderName"))
             backupRunRoot = created
             return created
         }
@@ -87,7 +89,7 @@ class ImageCompressor(private val context: Context) {
             onProgress(progress)
 
             val result = runCatching {
-                compressOne(entry, processedMarkers, ::ensureBackupRunRoot, settings, originalSize)
+                compressOne(entry, processedMarkers, ::ensureBackupRunRoot, settings, originalSize, text)
             }
 
             progress = result.fold(
@@ -98,7 +100,7 @@ class ImageCompressor(private val context: Context) {
                     val markerMessage = outcome.marker?.let {
                         runCatching { markerStore.save(processedMarkers) }
                             .exceptionOrNull()
-                            ?.let { error -> "记录失败：${entry.relativePath} - ${error.message ?: error.javaClass.simpleName}" }
+                            ?.let { error -> text.recordFailed(entry.relativePath, error.message ?: error.javaClass.simpleName) }
                     }
                     val messages = if (markerMessage == null) {
                         progress.messages + outcome.message
@@ -116,7 +118,7 @@ class ImageCompressor(private val context: Context) {
                     )
                 },
                 onFailure = { error ->
-                    val message = "失败：$currentPath - ${error.message ?: error.javaClass.simpleName}"
+                    val message = text.itemFailed(currentPath, error.message ?: error.javaClass.simpleName)
                     progress.copy(
                         processed = progress.processed + 1,
                         failed = progress.failed + 1,
@@ -220,18 +222,19 @@ class ImageCompressor(private val context: Context) {
         processedMarkers: Map<String, ProcessedMarker>,
         ensureBackupRunRoot: () -> DocumentFile,
         settings: CompressSettings,
-        originalSize: Long
+        originalSize: Long,
+        text: AppText
     ): CompressOutcome {
         val source = entry.file
-        val sourceName = source.name ?: return CompressOutcome(false, originalSize, "跳过：${entry.relativePath} 无文件名")
+        val sourceName = source.name ?: return CompressOutcome(false, originalSize, text.skipNoName(entry.relativePath))
         val format = imageFormat(sourceName)
-            ?: return CompressOutcome(false, originalSize, "跳过：${entry.relativePath} 格式不支持")
+            ?: return CompressOutcome(false, originalSize, text.skipUnsupported(entry.relativePath))
 
         if (processedMarkers[entry.relativePath]?.matches(source) == true) {
             return CompressOutcome(
                 compressed = false,
                 finalSize = originalSize,
-                message = "跳过：${entry.relativePath} 已处理过"
+                message = text.skipProcessed(entry.relativePath)
             )
         }
 
@@ -239,7 +242,7 @@ class ImageCompressor(private val context: Context) {
         try {
             val bitmap = resolver.openInputStream(source.uri).use { input ->
                 BitmapFactory.decodeStream(input)
-            } ?: return CompressOutcome(false, originalSize, "跳过：${entry.relativePath} 无法解码")
+            } ?: return CompressOutcome(false, originalSize, text.skipDecode(entry.relativePath))
 
             bitmap.use {
                 FileOutputStream(tempFile).use { output ->
@@ -247,7 +250,7 @@ class ImageCompressor(private val context: Context) {
                         ImageFormat.Jpeg -> it.compress(Bitmap.CompressFormat.JPEG, settings.jpegQuality, output)
                         ImageFormat.Png -> it.compress(Bitmap.CompressFormat.PNG, 100, output)
                     }
-                    if (!ok) error("压缩编码失败")
+                    if (!ok) error(text.encodeFailed())
                 }
             }
 
@@ -260,20 +263,20 @@ class ImageCompressor(private val context: Context) {
                 return CompressOutcome(
                     compressed = false,
                     finalSize = originalSize,
-                    message = "跳过：${entry.relativePath} 未变小，已记录",
+                    message = text.skipNotSmaller(entry.relativePath),
                     marker = source.toProcessedMarker(entry.relativePath)
                 )
             }
 
             val backupRunRoot = ensureBackupRunRoot()
-            val backupFile = createBackupFile(backupRunRoot, entry.relativePath, sourceName, source.type)
-            copyDocument(source.uri, backupFile.uri)
-            writeFileToDocument(tempFile, source.uri)
+            val backupFile = createBackupFile(backupRunRoot, entry.relativePath, sourceName, source.type, text)
+            copyDocument(source.uri, backupFile.uri, text)
+            writeFileToDocument(tempFile, source.uri, text)
 
             return CompressOutcome(
                 compressed = true,
                 finalSize = compressedSize,
-                message = "完成：${entry.relativePath} ${formatBytes(originalSize)} -> ${formatBytes(compressedSize)}",
+                message = text.doneFile(entry.relativePath, formatBytes(originalSize), formatBytes(compressedSize)),
                 marker = source.toProcessedMarker(entry.relativePath, fallbackSize = compressedSize)
             )
         } finally {
@@ -297,7 +300,8 @@ class ImageCompressor(private val context: Context) {
         backupRunRoot: DocumentFile,
         relativePath: String,
         fileName: String,
-        mimeType: String?
+        mimeType: String?,
+        text: AppText
     ): DocumentFile {
         val parentPath = relativePath.substringBeforeLast("/", missingDelimiterValue = "")
         val parent = parentPath
@@ -306,25 +310,25 @@ class ImageCompressor(private val context: Context) {
             .fold(backupRunRoot) { dir, segment ->
                 dir.findFile(segment)?.takeIf { it.isDirectory }
                     ?: dir.createDirectory(segment)
-                    ?: error("无法创建备份子目录：$segment")
+                    ?: error(text.createBackupSubdirFailed(segment))
             }
         return parent.createFile(mimeType ?: mimeFor(fileName), fileName)
-            ?: error("无法创建备份文件：$relativePath")
+            ?: error(text.createBackupFileFailed(relativePath))
     }
 
-    private fun copyDocument(from: Uri, to: Uri) {
+    private fun copyDocument(from: Uri, to: Uri, text: AppText) {
         resolver.openInputStream(from).use { input ->
             resolver.openOutputStream(to, "wt").use { output ->
-                if (input == null || output == null) error("无法打开备份流")
+                if (input == null || output == null) error(text.openBackupStreamFailed())
                 input.copyTo(output)
             }
         }
     }
 
-    private fun writeFileToDocument(from: File, to: Uri) {
+    private fun writeFileToDocument(from: File, to: Uri, text: AppText) {
         from.inputStream().use { input ->
             resolver.openOutputStream(to, "wt").use { output ->
-                if (output == null) error("无法写入原图")
+                if (output == null) error(text.openWriteStreamFailed())
                 input.copyTo(output)
             }
         }
@@ -358,7 +362,10 @@ class ImageCompressor(private val context: Context) {
         }
     }
 
-    private inner class ProcessMarkerStore(private val backupRoot: DocumentFile) {
+    private inner class ProcessMarkerStore(
+        private val backupRoot: DocumentFile,
+        private val appText: AppText
+    ) {
         fun load(): Map<String, ProcessedMarker> {
             val markerFile = backupRoot.findFile(PROCESS_MARKER_FILE) ?: return emptyMap()
             val text = resolver.openInputStream(markerFile.uri).use { input ->
@@ -381,7 +388,7 @@ class ImageCompressor(private val context: Context) {
         fun save(markers: Map<String, ProcessedMarker>) {
             val markerFile = backupRoot.findFile(PROCESS_MARKER_FILE)
                 ?: backupRoot.createFile("text/tab-separated-values", PROCESS_MARKER_FILE)
-                ?: error("无法创建处理记录文件：$PROCESS_MARKER_FILE")
+                ?: error(appText.createMarkerFileFailed(PROCESS_MARKER_FILE))
             val text = buildString {
                 appendLine("# PhotoCompress processed marker v1")
                 markers.values
@@ -398,7 +405,7 @@ class ImageCompressor(private val context: Context) {
                     }
             }
             resolver.openOutputStream(markerFile.uri, "wt").use { output ->
-                if (output == null) error("无法写入处理记录文件：$PROCESS_MARKER_FILE")
+                if (output == null) error(appText.writeMarkerFileFailed(PROCESS_MARKER_FILE))
                 output.write(text.toByteArray(Charsets.UTF_8))
             }
         }
@@ -449,6 +456,7 @@ class ImageCompressor(private val context: Context) {
         private const val MAX_MESSAGES = 8
         private const val PROCESS_MARKER_FILE = ".photo_compress_processed.tsv"
 
+        @Suppress("DEPRECATION")
         private val JPEG_EXIF_TAGS = arrayOf(
             ExifInterface.TAG_APERTURE_VALUE,
             ExifInterface.TAG_ARTIST,
