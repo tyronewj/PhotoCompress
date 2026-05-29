@@ -41,6 +41,13 @@ data class CompressProgress(
         get() = if (originalBytes <= 0L) 0f else savedBytes * 100f / originalBytes
 }
 
+data class BackupCleanupResult(
+    val deletedFiles: Int = 0,
+    val deletedDirs: Int = 0,
+    val failed: Int = 0,
+    val deletedBytes: Long = 0
+)
+
 class ImageCompressor(private val context: Context) {
     private val resolver: ContentResolver = context.contentResolver
 
@@ -125,6 +132,64 @@ class ImageCompressor(private val context: Context) {
         return progress.copy(currentPath = "")
     }
 
+    fun deleteBackupImages(root: DocumentFile, backupFolderName: String = "bk"): BackupCleanupResult {
+        val backupRoot = root.findFile(backupFolderName)?.takeIf { it.isDirectory }
+            ?: return BackupCleanupResult()
+        var deletedFiles = 0
+        var deletedDirs = 0
+        var failed = 0
+        var deletedBytes = 0L
+
+        fun cleanDirectory(dir: DocumentFile, isRoot: Boolean): Boolean {
+            var hasRemainingChildren = false
+            for (child in dir.listFiles()) {
+                val name = child.name
+                if (name == PROCESS_MARKER_FILE) {
+                    hasRemainingChildren = true
+                    continue
+                }
+
+                if (child.isDirectory) {
+                    val emptyAfterCleanup = cleanDirectory(child, isRoot = false)
+                    if (emptyAfterCleanup) {
+                        if (child.delete()) {
+                            deletedDirs += 1
+                        } else {
+                            failed += 1
+                            hasRemainingChildren = true
+                        }
+                    } else {
+                        hasRemainingChildren = true
+                    }
+                    continue
+                }
+
+                if (child.isFile && name != null && isSupportedImage(name)) {
+                    val fileSize = child.length().coerceAtLeast(0)
+                    if (child.delete()) {
+                        deletedFiles += 1
+                        deletedBytes += fileSize
+                    } else {
+                        failed += 1
+                        hasRemainingChildren = true
+                    }
+                    continue
+                }
+
+                hasRemainingChildren = true
+            }
+            return !isRoot && !hasRemainingChildren
+        }
+
+        cleanDirectory(backupRoot, isRoot = true)
+        return BackupCleanupResult(
+            deletedFiles = deletedFiles,
+            deletedDirs = deletedDirs,
+            failed = failed,
+            deletedBytes = deletedBytes
+        )
+    }
+
     private fun collectImages(root: DocumentFile, settings: CompressSettings): List<ImageEntry> {
         val result = mutableListOf<ImageEntry>()
 
@@ -132,7 +197,7 @@ class ImageCompressor(private val context: Context) {
             for (child in dir.listFiles()) {
                 val name = child.name ?: continue
                 if (child.isDirectory) {
-                    if (depth == 0 && name == settings.backupFolderName) continue
+                    if (name == settings.backupFolderName || name.startsWith(".")) continue
                     if (settings.recursive) {
                         val childPath = joinPath(relativeDir, name)
                         walk(child, childPath, depth + 1)

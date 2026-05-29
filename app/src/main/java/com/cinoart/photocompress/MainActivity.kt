@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -25,7 +26,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
@@ -33,6 +37,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -86,6 +91,7 @@ fun PhotoCompressApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val appVersionLabel = remember(context) { appVersionLabel(context) }
+    var showFeaturePage by rememberSaveable { mutableStateOf(false) }
     var selectedTreeUri by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedFolderName by rememberSaveable { mutableStateOf("未选择目录") }
     var jpegQuality by rememberSaveable { mutableIntStateOf(86) }
@@ -93,8 +99,20 @@ fun PhotoCompressApp() {
     var preserveExif by rememberSaveable { mutableStateOf(true) }
     var progress by remember { mutableStateOf(CompressProgress()) }
     var runningJob by remember { mutableStateOf<Job?>(null) }
+    var cleanupJob by remember { mutableStateOf<Job?>(null) }
     var status by remember { mutableStateOf("选择相册目录后开始压缩。JPEG 会保留 EXIF，已处理过的图片会跳过。") }
     val isRunning = runningJob?.isActive == true
+    val isCleaning = cleanupJob?.isActive == true
+    val isBusy = isRunning || isCleaning
+
+    if (showFeaturePage) {
+        BackHandler { showFeaturePage = false }
+        FeatureInfoScreen(
+            appVersionLabel = appVersionLabel,
+            onBack = { showFeaturePage = false }
+        )
+        return
+    }
 
     val folderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -139,23 +157,27 @@ fun PhotoCompressApp() {
             FolderPanel(
                 folderName = selectedFolderName,
                 status = status,
-                isRunning = isRunning,
+                isRunning = isBusy,
                 onPickFolder = { folderLauncher.launch(null) }
             )
+
+            FeatureInfoButton(onClick = { showFeaturePage = true })
 
             SettingsPanel(
                 quality = jpegQuality,
                 recursive = recursive,
                 preserveExif = preserveExif,
-                isRunning = isRunning,
+                isRunning = isBusy,
                 onQualityChange = { jpegQuality = it },
                 onRecursiveChange = { recursive = it },
                 onPreserveExifChange = { preserveExif = it }
             )
 
             ActionPanel(
-                canStart = selectedTreeUri != null && !isRunning,
+                canStart = selectedTreeUri != null && !isBusy,
+                canClearBackups = selectedTreeUri != null && !isBusy,
                 isRunning = isRunning,
+                isCleaning = isCleaning,
                 onStart = {
                     val uri = selectedTreeUri?.let(Uri::parse) ?: return@ActionPanel
                     val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
@@ -195,6 +217,30 @@ fun PhotoCompressApp() {
                 },
                 onStop = {
                     runningJob?.cancel()
+                },
+                onClearBackups = {
+                    val uri = selectedTreeUri?.let(Uri::parse) ?: return@ActionPanel
+                    val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
+                        status = "无法打开所选目录，请重新选择。"
+                        return@ActionPanel
+                    }
+                    cleanupJob = scope.launch {
+                        status = "正在清空 bk 目录下的备份图片..."
+                        try {
+                            val result = withContext(Dispatchers.IO) {
+                                ImageCompressor(context.applicationContext).deleteBackupImages(tree)
+                            }
+                            status = if (result.failed == 0) {
+                                "已删除 ${result.deletedFiles} 张备份图片，释放 ${ImageCompressor.formatBytes(result.deletedBytes)}。"
+                            } else {
+                                "已删除 ${result.deletedFiles} 张备份图片，${result.failed} 项删除失败。"
+                            }
+                        } catch (error: Throwable) {
+                            status = "清空备份失败：${error.message ?: error.javaClass.simpleName}"
+                        } finally {
+                            cleanupJob = null
+                        }
+                    }
                 }
             )
 
@@ -212,6 +258,73 @@ private fun appVersionLabel(context: Context): String {
         packageInfo.versionCode.toLong()
     }
     return "v${packageInfo.versionName ?: "-"} ($versionCode)"
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FeatureInfoScreen(
+    appVersionLabel: String,
+    onBack: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                title = {
+                    Column {
+                        Text("功能说明")
+                        Text(
+                            appVersionLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            FeatureSection(
+                title = "本地压缩",
+                lines = listOf(
+                    "通过系统文件夹选择器选择相册目录。",
+                    "图片只在手机本地处理，不上传网络。",
+                    "支持 JPEG 和 PNG，JPEG 可调压缩质量。"
+                )
+            )
+            FeatureSection(
+                title = "备份与恢复空间",
+                lines = listOf(
+                    "压缩前会把原图复制到所选目录的 bk 文件夹。",
+                    "可一键清空 bk 中的备份图片，释放手机空间。",
+                    "清空备份会保留处理记录，避免下次重复压缩。"
+                )
+            )
+            FeatureSection(
+                title = "EXIF 与跳过规则",
+                lines = listOf(
+                    "保留 EXIF 开关开启时，会复制 JPEG 的拍摄时间、机型、定位等元数据。",
+                    "已处理过的图片会自动跳过。",
+                    "bk 目录和以 . 开头的隐藏目录不会进入压缩队列。"
+                )
+            )
+        }
+    }
 }
 
 @Composable
@@ -247,6 +360,43 @@ private fun FolderPanel(
             }
             Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+@Composable
+private fun FeatureInfoButton(onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Icon(Icons.Filled.Info, contentDescription = null)
+        Spacer(Modifier.width(8.dp))
+        Text("功能说明")
+    }
+}
+
+@Composable
+private fun FeatureSection(title: String, lines: List<String>) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            lines.forEach { line -> FeatureLine(line) }
+        }
+    }
+}
+
+@Composable
+private fun FeatureLine(text: String) {
+    Row(verticalAlignment = Alignment.Top) {
+        Text("•", style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.width(8.dp))
+        Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
     }
 }
 
@@ -295,7 +445,7 @@ private fun SettingsPanel(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("包含子目录", style = MaterialTheme.typography.bodyLarge)
-                    Text("会跳过 bk 备份目录和已处理图片", style = MaterialTheme.typography.bodyMedium)
+                    Text("会跳过 bk、隐藏目录和已处理图片", style = MaterialTheme.typography.bodyMedium)
                 }
                 Switch(
                     checked = recursive,
@@ -310,28 +460,42 @@ private fun SettingsPanel(
 @Composable
 private fun ActionPanel(
     canStart: Boolean,
+    canClearBackups: Boolean,
     isRunning: Boolean,
+    isCleaning: Boolean,
     onStart: () -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    onClearBackups: () -> Unit
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button(
-            onClick = onStart,
-            enabled = canStart,
-            modifier = Modifier.weight(1f)
-        ) {
-            Icon(Icons.Filled.PlayArrow, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("开始压缩")
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(
+                onClick = onStart,
+                enabled = canStart,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(Icons.Filled.PlayArrow, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("开始压缩")
+            }
+            OutlinedButton(
+                onClick = onStop,
+                enabled = isRunning,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(Icons.Filled.Stop, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("停止")
+            }
         }
         OutlinedButton(
-            onClick = onStop,
-            enabled = isRunning,
-            modifier = Modifier.weight(1f)
+            onClick = onClearBackups,
+            enabled = canClearBackups,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Icon(Icons.Filled.Stop, contentDescription = null)
+            Icon(Icons.Filled.Delete, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text("停止")
+            Text(if (isCleaning) "正在清空备份..." else "清空备份图片")
         }
     }
 }
