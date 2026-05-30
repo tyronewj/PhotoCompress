@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -96,6 +97,7 @@ fun PhotoCompressApp() {
     var language by rememberSaveable { mutableStateOf(loadAppLanguage(context)) }
     val text = remember(language) { AppText(language) }
     var showFeaturePage by rememberSaveable { mutableStateOf(false) }
+    var showSettingsPage by rememberSaveable { mutableStateOf(false) }
     var selectedTreeUri by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedFolderName by rememberSaveable { mutableStateOf<String?>(null) }
     var qualityPreset by rememberSaveable { mutableStateOf(CompressionQualityPreset.Balanced) }
@@ -115,6 +117,29 @@ fun PhotoCompressApp() {
             appVersionLabel = appVersionLabel,
             text = text,
             onBack = { showFeaturePage = false }
+        )
+        return
+    }
+
+    if (showSettingsPage) {
+        BackHandler { showSettingsPage = false }
+        SettingsScreen(
+            appVersionLabel = appVersionLabel,
+            language = language,
+            qualityPreset = qualityPreset,
+            recursive = recursive,
+            preserveExif = preserveExif,
+            isRunning = isBusy,
+            text = text,
+            onBack = { showSettingsPage = false },
+            onLanguageChange = { nextLanguage ->
+                language = nextLanguage
+                saveAppLanguage(context, nextLanguage)
+                status = null
+            },
+            onQualityPresetChange = { qualityPreset = it },
+            onRecursiveChange = { recursive = it },
+            onPreserveExifChange = { preserveExif = it }
         )
         return
     }
@@ -144,6 +169,14 @@ fun PhotoCompressApp() {
                         )
                     }
                 },
+                actions = {
+                    IconButton(onClick = { showFeaturePage = true }) {
+                        Icon(Icons.Filled.Info, contentDescription = text.featureInfo)
+                    }
+                    IconButton(onClick = { showSettingsPage = true }) {
+                        Icon(Icons.Filled.Settings, contentDescription = text.settings)
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                     titleContentColor = MaterialTheme.colorScheme.onSurface
@@ -165,30 +198,6 @@ fun PhotoCompressApp() {
                 isRunning = isBusy,
                 text = text,
                 onPickFolder = { folderLauncher.launch(null) }
-            )
-
-            FeatureInfoButton(text = text, onClick = { showFeaturePage = true })
-
-            LanguagePanel(
-                language = language,
-                text = text,
-                isRunning = isBusy,
-                onLanguageChange = { nextLanguage ->
-                    language = nextLanguage
-                    saveAppLanguage(context, nextLanguage)
-                    status = null
-                }
-            )
-
-            SettingsPanel(
-                qualityPreset = qualityPreset,
-                recursive = recursive,
-                preserveExif = preserveExif,
-                isRunning = isBusy,
-                text = text,
-                onQualityPresetChange = { qualityPreset = it },
-                onRecursiveChange = { recursive = it },
-                onPreserveExifChange = { preserveExif = it }
             )
 
             ActionPanel(
@@ -296,6 +305,75 @@ private fun saveAppLanguage(context: Context, language: AppLanguage) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun SettingsScreen(
+    appVersionLabel: String,
+    language: AppLanguage,
+    qualityPreset: CompressionQualityPreset,
+    recursive: Boolean,
+    preserveExif: Boolean,
+    isRunning: Boolean,
+    text: AppText,
+    onBack: () -> Unit,
+    onLanguageChange: (AppLanguage) -> Unit,
+    onQualityPresetChange: (CompressionQualityPreset) -> Unit,
+    onRecursiveChange: (Boolean) -> Unit,
+    onPreserveExifChange: (Boolean) -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = text.back)
+                    }
+                },
+                title = {
+                    Column {
+                        Text(text.settings)
+                        Text(
+                            appVersionLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            LanguagePanel(
+                language = language,
+                text = text,
+                isRunning = isRunning,
+                onLanguageChange = onLanguageChange
+            )
+            SettingsPanel(
+                qualityPreset = qualityPreset,
+                recursive = recursive,
+                preserveExif = preserveExif,
+                isRunning = isRunning,
+                text = text,
+                onQualityPresetChange = onQualityPresetChange,
+                onRecursiveChange = onRecursiveChange,
+                onPreserveExifChange = onPreserveExifChange
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun FeatureInfoScreen(
     appVersionLabel: String,
     text: AppText,
@@ -384,18 +462,6 @@ private fun FolderPanel(
             }
             Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-    }
-}
-
-@Composable
-private fun FeatureInfoButton(text: AppText, onClick: () -> Unit) {
-    OutlinedButton(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Icon(Icons.Filled.Info, contentDescription = null)
-        Spacer(Modifier.width(8.dp))
-        Text(text.featureInfo)
     }
 }
 

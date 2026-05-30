@@ -39,6 +39,7 @@ internal class AppText(private val language: AppLanguage) {
     val folderTitle: String get() = if (zh) "相册目录" else "Photo folder"
     val choose: String get() = if (zh) "选择" else "Choose"
     val featureInfo: String get() = if (zh) "功能说明" else "Features"
+    val settings: String get() = if (zh) "设置" else "Settings"
     val languageTitle: String get() = if (zh) "界面语言" else "Language"
     val languageHint: String get() = if (zh) "切换后会保存到本机" else "Saved on this device"
     val chinese: String get() = if (zh) "中文" else "Chinese"
