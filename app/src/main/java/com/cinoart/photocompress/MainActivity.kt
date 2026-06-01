@@ -29,14 +29,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
@@ -49,6 +52,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,6 +62,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -75,6 +80,12 @@ import java.util.Locale
 
 private const val PREFS_NAME = "photo_compress_settings"
 private const val KEY_LANGUAGE = "language"
+private const val VIDEO_PAGE_SIZE = 50
+
+private enum class VideoSortOrder {
+    SizeDesc,
+    PathAsc
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,18 +109,34 @@ fun PhotoCompressApp() {
     val text = remember(language) { AppText(language) }
     var showFeaturePage by rememberSaveable { mutableStateOf(false) }
     var showSettingsPage by rememberSaveable { mutableStateOf(false) }
+    var showImageCompressPage by rememberSaveable { mutableStateOf(false) }
+    var showVideoCompressPage by rememberSaveable { mutableStateOf(false) }
     var selectedTreeUri by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedFolderName by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedVideoTreeUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedVideoFolderName by rememberSaveable { mutableStateOf<String?>(null) }
     var qualityPreset by rememberSaveable { mutableStateOf(CompressionQualityPreset.Balanced) }
     var recursive by rememberSaveable { mutableStateOf(true) }
+    var videoRecursive by rememberSaveable { mutableStateOf(true) }
+    var videoSortOrder by rememberSaveable { mutableStateOf(VideoSortOrder.SizeDesc) }
     var preserveExif by rememberSaveable { mutableStateOf(true) }
     var progress by remember { mutableStateOf(CompressProgress()) }
+    var videoProgress by remember { mutableStateOf(CompressProgress()) }
+    var videoFiles by remember { mutableStateOf<List<VideoFileInfo>>(emptyList()) }
+    var selectedVideoPaths by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var runningJob by remember { mutableStateOf<Job?>(null) }
     var cleanupJob by remember { mutableStateOf<Job?>(null) }
+    var videoRunningJob by remember { mutableStateOf<Job?>(null) }
+    var videoCleanupJob by remember { mutableStateOf<Job?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
+    var videoStatus by remember { mutableStateOf<String?>(null) }
     val isRunning = runningJob?.isActive == true
     val isCleaning = cleanupJob?.isActive == true
     val isBusy = isRunning || isCleaning
+    val isVideoRunning = videoRunningJob?.isActive == true
+    val isVideoCleaning = videoCleanupJob?.isActive == true
+    val isVideoBusy = isVideoRunning || isVideoCleaning
+    val isAnyBusy = isBusy || isVideoBusy
 
     if (showFeaturePage) {
         BackHandler { showFeaturePage = false }
@@ -129,7 +156,7 @@ fun PhotoCompressApp() {
             qualityPreset = qualityPreset,
             recursive = recursive,
             preserveExif = preserveExif,
-            isRunning = isBusy,
+            isRunning = isAnyBusy,
             text = text,
             onBack = { showSettingsPage = false },
             onLanguageChange = { nextLanguage ->
@@ -156,128 +183,269 @@ fun PhotoCompressApp() {
         status = text.folderReady
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(text.appTitle)
-                        Text(
-                            appVersionLabel,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { showFeaturePage = true }) {
-                        Icon(Icons.Filled.Info, contentDescription = text.featureInfo)
-                    }
-                    IconButton(onClick = { showSettingsPage = true }) {
-                        Icon(Icons.Filled.Settings, contentDescription = text.settings)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
-            )
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            FolderPanel(
-                folderName = selectedFolderName ?: text.noFolder,
-                status = status ?: text.initialStatus,
-                isRunning = isBusy,
-                text = text,
-                onPickFolder = { folderLauncher.launch(null) }
-            )
-
-            ActionPanel(
-                canStart = selectedTreeUri != null && !isBusy,
-                canClearBackups = selectedTreeUri != null && !isBusy,
-                isRunning = isRunning,
-                isCleaning = isCleaning,
-                text = text,
+    val videoFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        context.contentResolver.takePersistableUriPermission(uri, flags)
+        selectedVideoTreeUri = uri.toString()
+        selectedVideoFolderName = DocumentFile.fromTreeUri(context, uri)?.name ?: text.selectedFolder
+        videoProgress = CompressProgress()
+        videoFiles = emptyList()
+        selectedVideoPaths = emptyList()
+        videoStatus = text.videoScanningFiles
+        scope.launch {
+            scanVideoFolder(
+                context = context,
+                uri = uri,
+                recursive = videoRecursive,
+                language = language,
                 onStart = {
-                    val uri = selectedTreeUri?.let(Uri::parse) ?: return@ActionPanel
-                    val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
-                        status = text.unableOpenFolder
-                        return@ActionPanel
-                    }
-                    val settings = CompressSettings(
-                        jpegQuality = qualityPreset.jpegQuality,
-                        recursive = recursive,
-                        preserveExif = preserveExif,
-                        language = language
-                    )
-                    runningJob = scope.launch {
-                        val runText = AppText(language)
-                        status = runText.scanning
-                        progress = CompressProgress()
-                        try {
-                            val result = withContext(Dispatchers.IO) {
-                                ImageCompressor(context.applicationContext).compressTree(tree, settings) { next ->
-                                    withContext(Dispatchers.Main) {
-                                        progress = next
-                                    }
-                                }
-                            }
-                            progress = result
-                            status = if (result.compressed > 0) {
-                                runText.completeWithBackup(result.compressed, result.skipped, result.backupPath)
-                            } else {
-                                runText.completeNoNew(result.skipped)
-                            }
-                        } catch (_: CancellationException) {
-                            status = runText.stopped
-                        } catch (error: Throwable) {
-                            status = runText.error(error.message ?: error.javaClass.simpleName)
-                        } finally {
-                            runningJob = null
-                        }
-                    }
+                    videoStatus = text.videoScanningFiles
+                    videoFiles = emptyList()
+                    selectedVideoPaths = emptyList()
                 },
-                onStop = {
-                    runningJob?.cancel()
+                onSuccess = { files ->
+                    videoFiles = files
+                    selectedVideoPaths = files.map { it.relativePath }
+                    videoStatus = text.videoFolderReadyWithCount(files.size)
                 },
-                onClearBackups = {
-                    val uri = selectedTreeUri?.let(Uri::parse) ?: return@ActionPanel
-                    val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
-                        status = text.unableOpenFolder
-                        return@ActionPanel
-                    }
-                    cleanupJob = scope.launch {
-                        val runText = AppText(language)
-                        status = runText.clearingBackups
-                        try {
-                            val result = withContext(Dispatchers.IO) {
-                                ImageCompressor(context.applicationContext).deleteBackupImages(tree)
-                            }
-                            status = if (result.failed == 0) {
-                                runText.clearBackupSuccess(result.deletedFiles, ImageCompressor.formatBytes(result.deletedBytes))
-                            } else {
-                                runText.clearBackupPartial(result.deletedFiles, result.failed)
-                            }
-                        } catch (error: Throwable) {
-                            status = runText.clearBackupFailed(error.message ?: error.javaClass.simpleName)
-                        } finally {
-                            cleanupJob = null
-                        }
-                    }
-                }
+                onError = { message -> videoStatus = message }
             )
-
-            ProgressPanel(progress = progress, text = text)
         }
     }
+
+    if (showImageCompressPage) {
+        BackHandler {
+            if (!isBusy) showImageCompressPage = false
+        }
+        ImageCompressScreen(
+            appVersionLabel = appVersionLabel,
+            folderName = selectedFolderName ?: text.noFolder,
+            status = status ?: text.initialStatus,
+            progress = progress,
+            canStart = selectedTreeUri != null && !isBusy,
+            canClearBackups = selectedTreeUri != null && !isBusy,
+            isRunning = isRunning,
+            isCleaning = isCleaning,
+            isBusy = isBusy,
+            text = text,
+            onBack = { if (!isBusy) showImageCompressPage = false },
+            onPickFolder = { folderLauncher.launch(null) },
+            onStart = {
+                val uri = selectedTreeUri?.let(Uri::parse) ?: return@ImageCompressScreen
+                val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
+                    status = text.unableOpenFolder
+                    return@ImageCompressScreen
+                }
+                val settings = CompressSettings(
+                    jpegQuality = qualityPreset.jpegQuality,
+                    recursive = recursive,
+                    preserveExif = preserveExif,
+                    language = language
+                )
+                runningJob = scope.launch {
+                    val runText = AppText(language)
+                    status = runText.scanning
+                    progress = CompressProgress()
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            ImageCompressor(context.applicationContext).compressTree(tree, settings) { next ->
+                                withContext(Dispatchers.Main) {
+                                    progress = next
+                                }
+                            }
+                        }
+                        progress = result
+                        status = if (result.compressed > 0) {
+                            runText.completeWithBackup(result.compressed, result.skipped, result.backupPath)
+                        } else {
+                            runText.completeNoNew(result.skipped)
+                        }
+                    } catch (_: CancellationException) {
+                        status = runText.stopped
+                    } catch (error: Throwable) {
+                        status = runText.error(error.message ?: error.javaClass.simpleName)
+                    } finally {
+                        runningJob = null
+                    }
+                }
+            },
+            onStop = {
+                runningJob?.cancel()
+            },
+            onClearBackups = {
+                val uri = selectedTreeUri?.let(Uri::parse) ?: return@ImageCompressScreen
+                val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
+                    status = text.unableOpenFolder
+                    return@ImageCompressScreen
+                }
+                cleanupJob = scope.launch {
+                    val runText = AppText(language)
+                    status = runText.clearingBackups
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            ImageCompressor(context.applicationContext).deleteBackupImages(tree)
+                        }
+                        status = if (result.failed == 0) {
+                            runText.clearBackupSuccess(result.deletedFiles, ImageCompressor.formatBytes(result.deletedBytes))
+                        } else {
+                            runText.clearBackupPartial(result.deletedFiles, result.failed)
+                        }
+                    } catch (error: Throwable) {
+                        status = runText.clearBackupFailed(error.message ?: error.javaClass.simpleName)
+                    } finally {
+                        cleanupJob = null
+                    }
+                }
+            }
+        )
+        return
+    }
+
+    if (showVideoCompressPage) {
+        BackHandler {
+            if (!isVideoBusy) showVideoCompressPage = false
+        }
+        VideoCompressScreen(
+            appVersionLabel = appVersionLabel,
+            folderName = selectedVideoFolderName ?: text.noFolder,
+            status = videoStatus ?: text.videoInitialStatus,
+            progress = videoProgress,
+            videos = videoFiles,
+            selectedVideoPaths = selectedVideoPaths,
+            recursive = videoRecursive,
+            sortOrder = videoSortOrder,
+            canStart = selectedVideoTreeUri != null && selectedVideoPaths.isNotEmpty() && !isVideoBusy,
+            canClearBackups = selectedVideoTreeUri != null && !isVideoBusy,
+            isRunning = isVideoRunning,
+            isCleaning = isVideoCleaning,
+            isBusy = isVideoBusy,
+            text = text,
+            onBack = { if (!isVideoBusy) showVideoCompressPage = false },
+            onPickFolder = { videoFolderLauncher.launch(null) },
+            onRecursiveChange = { nextRecursive ->
+                videoRecursive = nextRecursive
+                val uri = selectedVideoTreeUri?.let(Uri::parse) ?: return@VideoCompressScreen
+                scope.launch {
+                    scanVideoFolder(
+                        context = context,
+                        uri = uri,
+                        recursive = nextRecursive,
+                        language = language,
+                        onStart = {
+                            videoStatus = text.videoScanningFiles
+                            videoFiles = emptyList()
+                            selectedVideoPaths = emptyList()
+                        },
+                        onSuccess = { files ->
+                            videoFiles = files
+                            selectedVideoPaths = files.map { it.relativePath }
+                            videoStatus = text.videoFolderReadyWithCount(files.size)
+                        },
+                        onError = { message -> videoStatus = message }
+                    )
+                }
+            },
+            onSortOrderChange = { videoSortOrder = it },
+            onToggleVideo = { path ->
+                selectedVideoPaths = if (path in selectedVideoPaths) {
+                    selectedVideoPaths - path
+                } else {
+                    (selectedVideoPaths + path).distinct()
+                }
+            },
+            onSelectAllVideos = {
+                selectedVideoPaths = videoFiles.map { it.relativePath }
+            },
+            onClearVideoSelection = {
+                selectedVideoPaths = emptyList()
+            },
+            onStart = {
+                val uri = selectedVideoTreeUri?.let(Uri::parse) ?: return@VideoCompressScreen
+                val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
+                    videoStatus = text.unableOpenFolder
+                    return@VideoCompressScreen
+                }
+                val selectedPaths = selectedVideoPaths.toSet()
+                if (selectedPaths.isEmpty()) {
+                    videoStatus = text.noVideoSelected
+                    return@VideoCompressScreen
+                }
+                val settings = VideoCompressSettings(
+                    videoBitrate = qualityPreset.videoBitrate,
+                    recursive = videoRecursive,
+                    selectedRelativePaths = selectedPaths,
+                    language = language
+                )
+                videoRunningJob = scope.launch {
+                    val runText = AppText(language)
+                    videoStatus = runText.videoScanning
+                    videoProgress = CompressProgress()
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            VideoCompressor(context.applicationContext).compressTree(tree, settings) { next ->
+                                withContext(Dispatchers.Main) {
+                                    videoProgress = next
+                                }
+                            }
+                        }
+                        videoProgress = result
+                        videoStatus = when {
+                            result.failed > 0 -> runText.videoCompleteWithFailures(result.compressed, result.skipped, result.failed)
+                            result.compressed > 0 -> runText.videoCompleteWithBackup(result.compressed, result.skipped, result.backupPath)
+                            else -> runText.videoCompleteNoNew(result.skipped)
+                        }
+                    } catch (_: CancellationException) {
+                        videoStatus = runText.stopped
+                    } catch (error: Throwable) {
+                        videoStatus = runText.error(error.message ?: error.javaClass.simpleName)
+                    } finally {
+                        videoRunningJob = null
+                    }
+                }
+            },
+            onStop = {
+                videoRunningJob?.cancel()
+            },
+            onClearBackups = {
+                val uri = selectedVideoTreeUri?.let(Uri::parse) ?: return@VideoCompressScreen
+                val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
+                    videoStatus = text.unableOpenFolder
+                    return@VideoCompressScreen
+                }
+                videoCleanupJob = scope.launch {
+                    val runText = AppText(language)
+                    videoStatus = runText.clearingVideoBackups
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            VideoCompressor(context.applicationContext).deleteBackupVideos(tree)
+                        }
+                        videoStatus = if (result.failed == 0) {
+                            runText.clearVideoBackupSuccess(result.deletedFiles, ImageCompressor.formatBytes(result.deletedBytes))
+                        } else {
+                            runText.clearVideoBackupPartial(result.deletedFiles, result.failed)
+                        }
+                    } catch (error: Throwable) {
+                        videoStatus = runText.clearBackupFailed(error.message ?: error.javaClass.simpleName)
+                    } finally {
+                        videoCleanupJob = null
+                    }
+                }
+            }
+        )
+        return
+    }
+
+    HomeScreen(
+        appVersionLabel = appVersionLabel,
+        text = text,
+        onFeatureClick = { showFeaturePage = true },
+        onSettingsClick = { showSettingsPage = true },
+        onImageCompressClick = { showImageCompressPage = true },
+        onVideoCompressClick = { showVideoCompressPage = true }
+    )
 }
 
 private fun appVersionLabel(context: Context): String {
@@ -301,6 +469,302 @@ private fun saveAppLanguage(context: Context, language: AppLanguage) {
         .edit()
         .putString(KEY_LANGUAGE, language.storageValue)
         .apply()
+}
+
+private suspend fun scanVideoFolder(
+    context: Context,
+    uri: Uri,
+    recursive: Boolean,
+    language: AppLanguage,
+    onStart: () -> Unit,
+    onSuccess: (List<VideoFileInfo>) -> Unit,
+    onError: (String) -> Unit
+) {
+    val text = AppText(language)
+    onStart()
+    try {
+        val tree = DocumentFile.fromTreeUri(context, uri) ?: run {
+            onError(text.unableOpenFolder)
+            return
+        }
+        val files = withContext(Dispatchers.IO) {
+            VideoCompressor(context.applicationContext).scanVideos(
+                tree,
+                VideoCompressSettings(
+                    recursive = recursive,
+                    language = language
+                )
+            )
+        }
+        onSuccess(files)
+    } catch (error: Throwable) {
+        onError(text.error(error.message ?: error.javaClass.simpleName))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HomeScreen(
+    appVersionLabel: String,
+    text: AppText,
+    onFeatureClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    onImageCompressClick: () -> Unit,
+    onVideoCompressClick: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(text.appTitle)
+                        Text(
+                            appVersionLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onFeatureClick) {
+                        Icon(Icons.Filled.Info, contentDescription = text.featureInfo)
+                    }
+                    IconButton(onClick = onSettingsClick) {
+                        Icon(Icons.Filled.Settings, contentDescription = text.settings)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            HomeEntryButton(
+                label = text.imageCompression,
+                icon = Icons.Filled.Image,
+                modifier = Modifier.weight(1f),
+                onClick = onImageCompressClick
+            )
+            HomeEntryButton(
+                label = text.videoCompression,
+                icon = Icons.Filled.Videocam,
+                modifier = Modifier.weight(1f),
+                onClick = onVideoCompressClick
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomeEntryButton(
+    label: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier
+            .height(72.dp)
+    ) {
+        Icon(icon, contentDescription = null)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ImageCompressScreen(
+    appVersionLabel: String,
+    folderName: String,
+    status: String,
+    progress: CompressProgress,
+    canStart: Boolean,
+    canClearBackups: Boolean,
+    isRunning: Boolean,
+    isCleaning: Boolean,
+    isBusy: Boolean,
+    text: AppText,
+    onBack: () -> Unit,
+    onPickFolder: () -> Unit,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onClearBackups: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack, enabled = !isBusy) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = text.back)
+                    }
+                },
+                title = {
+                    Column {
+                        Text(text.imageCompression)
+                        Text(
+                            appVersionLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            FolderPanel(
+                title = text.folderTitle,
+                folderName = folderName,
+                status = status,
+                isRunning = isBusy,
+                text = text,
+                onPickFolder = onPickFolder
+            )
+            ActionPanel(
+                canStart = canStart,
+                canClearBackups = canClearBackups,
+                isRunning = isRunning,
+                isCleaning = isCleaning,
+                clearBackups = text.clearBackups,
+                clearingBackupsButton = text.clearingBackupsButton,
+                text = text,
+                onStart = onStart,
+                onStop = onStop,
+                onClearBackups = onClearBackups
+            )
+            ProgressPanel(progress = progress, text = text)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VideoCompressScreen(
+    appVersionLabel: String,
+    folderName: String,
+    status: String,
+    progress: CompressProgress,
+    videos: List<VideoFileInfo>,
+    selectedVideoPaths: List<String>,
+    recursive: Boolean,
+    sortOrder: VideoSortOrder,
+    canStart: Boolean,
+    canClearBackups: Boolean,
+    isRunning: Boolean,
+    isCleaning: Boolean,
+    isBusy: Boolean,
+    text: AppText,
+    onBack: () -> Unit,
+    onPickFolder: () -> Unit,
+    onRecursiveChange: (Boolean) -> Unit,
+    onSortOrderChange: (VideoSortOrder) -> Unit,
+    onToggleVideo: (String) -> Unit,
+    onSelectAllVideos: () -> Unit,
+    onClearVideoSelection: () -> Unit,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onClearBackups: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack, enabled = !isBusy) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = text.back)
+                    }
+                },
+                title = {
+                    Column {
+                        Text(text.videoCompression)
+                        Text(
+                            appVersionLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            FolderPanel(
+                title = text.videoFolderTitle,
+                folderName = folderName,
+                status = status,
+                isRunning = isBusy,
+                text = text,
+                onPickFolder = onPickFolder
+            )
+            VideoOptionsPanel(
+                recursive = recursive,
+                sortOrder = sortOrder,
+                isRunning = isBusy,
+                text = text,
+                onRecursiveChange = onRecursiveChange,
+                onSortOrderChange = onSortOrderChange
+            )
+            VideoSelectionPanel(
+                videos = videos,
+                selectedVideoPaths = selectedVideoPaths,
+                sortOrder = sortOrder,
+                isRunning = isBusy,
+                text = text,
+                onToggleVideo = onToggleVideo,
+                onSelectAllVideos = onSelectAllVideos,
+                onClearVideoSelection = onClearVideoSelection
+            )
+            ActionPanel(
+                canStart = canStart,
+                canClearBackups = canClearBackups,
+                isRunning = isRunning,
+                isCleaning = isCleaning,
+                clearBackups = text.clearVideoBackups,
+                clearingBackupsButton = text.clearingVideoBackupsButton,
+                text = text,
+                onStart = onStart,
+                onStop = onStop,
+                onClearBackups = onClearBackups
+            )
+            ProgressPanel(progress = progress, text = text)
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -430,6 +894,7 @@ private fun FeatureInfoScreen(
 
 @Composable
 private fun FolderPanel(
+    title: String,
     folderName: String,
     status: String,
     isRunning: Boolean,
@@ -444,7 +909,7 @@ private fun FolderPanel(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(text.folderTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = folderName,
@@ -461,6 +926,204 @@ private fun FolderPanel(
                 }
             }
             Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun VideoOptionsPanel(
+    recursive: Boolean,
+    sortOrder: VideoSortOrder,
+    isRunning: Boolean,
+    text: AppText,
+    onRecursiveChange: (Boolean) -> Unit,
+    onSortOrderChange: (VideoSortOrder) -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(text.includeSubfolders, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        text.videoIncludeSubfoldersDescription,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = recursive,
+                    enabled = !isRunning,
+                    onCheckedChange = onRecursiveChange
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(text.videoSortTitle, style = MaterialTheme.typography.bodyLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SortChoiceButton(
+                        label = text.videoSortBySize,
+                        selected = sortOrder == VideoSortOrder.SizeDesc,
+                        enabled = !isRunning,
+                        modifier = Modifier.weight(1f),
+                        onClick = { onSortOrderChange(VideoSortOrder.SizeDesc) }
+                    )
+                    SortChoiceButton(
+                        label = text.videoSortByPath,
+                        selected = sortOrder == VideoSortOrder.PathAsc,
+                        enabled = !isRunning,
+                        modifier = Modifier.weight(1f),
+                        onClick = { onSortOrderChange(VideoSortOrder.PathAsc) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SortChoiceButton(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    if (selected) {
+        Button(onClick = onClick, enabled = enabled, modifier = modifier) {
+            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    } else {
+        OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier) {
+            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun VideoSelectionPanel(
+    videos: List<VideoFileInfo>,
+    selectedVideoPaths: List<String>,
+    sortOrder: VideoSortOrder,
+    isRunning: Boolean,
+    text: AppText,
+    onToggleVideo: (String) -> Unit,
+    onSelectAllVideos: () -> Unit,
+    onClearVideoSelection: () -> Unit
+) {
+    val selected = selectedVideoPaths.toSet()
+    var pageIndex by rememberSaveable { mutableStateOf(0) }
+    val sortedVideos = remember(videos, sortOrder) {
+        when (sortOrder) {
+            VideoSortOrder.SizeDesc -> videos.sortedWith(compareByDescending<VideoFileInfo> { it.size }.thenBy { it.relativePath.lowercase(Locale.US) })
+            VideoSortOrder.PathAsc -> videos.sortedBy { it.relativePath.lowercase(Locale.US) }
+        }
+    }
+    LaunchedEffect(videos, sortOrder) {
+        pageIndex = 0
+    }
+    val pageCount = if (sortedVideos.isEmpty()) {
+        1
+    } else {
+        ((sortedVideos.size - 1) / VIDEO_PAGE_SIZE) + 1
+    }
+    val currentPage = pageIndex.coerceIn(0, pageCount - 1)
+    val firstIndex = currentPage * VIDEO_PAGE_SIZE
+    val pagedVideos = sortedVideos.drop(firstIndex).take(VIDEO_PAGE_SIZE)
+    val lastIndex = (firstIndex + pagedVideos.size).coerceAtMost(sortedVideos.size)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(text.videoSelectionTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text.videoSelectionCount(selected.size, videos.size),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(
+                    onClick = onSelectAllVideos,
+                    enabled = !isRunning && videos.isNotEmpty(),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text.selectAllVideos, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                OutlinedButton(
+                    onClick = onClearVideoSelection,
+                    enabled = !isRunning && selected.isNotEmpty(),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(text.clearVideoSelection, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            if (videos.isEmpty()) {
+                Text(
+                    text.noVideosFound,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                if (sortedVideos.size > VIDEO_PAGE_SIZE) {
+                    Text(
+                        text.videoPageInfo(currentPage + 1, pageCount, firstIndex + 1, lastIndex, sortedVideos.size),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(
+                            onClick = { pageIndex = currentPage - 1 },
+                            enabled = !isRunning && currentPage > 0,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(text.previousPage, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        OutlinedButton(
+                            onClick = { pageIndex = currentPage + 1 },
+                            enabled = !isRunning && currentPage < pageCount - 1,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(text.nextPage, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    pagedVideos.forEach { video ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = video.relativePath in selected,
+                                enabled = !isRunning,
+                                onCheckedChange = { onToggleVideo(video.relativePath) }
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    video.relativePath,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    ImageCompressor.formatBytes(video.size),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -663,6 +1326,8 @@ private fun ActionPanel(
     canClearBackups: Boolean,
     isRunning: Boolean,
     isCleaning: Boolean,
+    clearBackups: String,
+    clearingBackupsButton: String,
     text: AppText,
     onStart: () -> Unit,
     onStop: () -> Unit,
@@ -696,7 +1361,7 @@ private fun ActionPanel(
         ) {
             Icon(Icons.Filled.Delete, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text(if (isCleaning) text.clearingBackupsButton else text.clearBackups)
+            Text(if (isCleaning) clearingBackupsButton else clearBackups)
         }
     }
 }

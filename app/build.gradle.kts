@@ -12,8 +12,8 @@ android {
         applicationId = "com.cinoart.photocompress"
         minSdk = 24
         targetSdk = 34
-        versionCode = 10
-        versionName = "1.1.8"
+        versionCode = 18
+        versionName = "1.1.16"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -54,6 +54,8 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.exifinterface)
+    implementation(libs.androidx.media3.transformer)
+    implementation(libs.androidx.media3.muxer)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
